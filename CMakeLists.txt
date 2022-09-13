@@ -1,19 +1,13 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(h264_filter)
+project(ffmpeg_demo)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set (Boost_FIND_REQUIRED TRUE)
-set (Boost_FIND_QUIETLY TRUE)
-set (Boost_DEBUG FALSE)
-set (Boost_USE_MULTITHREADED TRUE)
-
-find_package (Boost)
-
 find_package(PkgConfig REQUIRED)
+
 pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavfilter
     libavformat
@@ -21,9 +15,6 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
     )
 
-include_directories (${Boost_INCLUDE_DIRS})
-link_directories (${Boost_LIBRARY_DIRS})
+add_subdirectory(h264_to_yuv)
 
-add_executable(${PROJECT_NAME} main.cpp ${Boost_LIBRARIES})
 
-target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES}      PkgConfig::LIBAV)
