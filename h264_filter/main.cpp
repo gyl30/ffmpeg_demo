@@ -346,6 +346,7 @@ int main(int argc, char** argv)
             decode_package(h264_ctx, decode_cb);
         }
     }
+    decode_package(h264_ctx, decode_cb);
 
     LOG_DEBUG << "Hello World";
 
