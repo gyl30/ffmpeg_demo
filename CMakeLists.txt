@@ -17,4 +17,5 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
 
 add_subdirectory(h264_to_yuv)
 
+add_subdirectory(h264_filter)
 
