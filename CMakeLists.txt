@@ -27,3 +27,4 @@ add_subdirectory(h264_to_yuv)
 
 add_subdirectory(h264_filter)
 
+add_subdirectory(aac_pcm)
