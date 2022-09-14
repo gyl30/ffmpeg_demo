@@ -317,6 +317,7 @@ int main(int argc, char** argv)
         if (filter_ctx == nullptr)
         {
             LOG_ERROR << "create filter failed";
+            return;
         }
         filter_frame(filter_ctx, frame, filter_cb);
     };
