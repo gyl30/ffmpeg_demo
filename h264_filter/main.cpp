@@ -22,8 +22,6 @@ using FilterCb = std::function<void(AVFrame*)>;
 
 struct FilterContext
 {
-    AVFilterInOut* inputs = nullptr;
-    AVFilterInOut* outputs = nullptr;
     AVFilterContext* src_ctx = nullptr;
     AVFilterContext* sink_ctx = nullptr;
     AVFilterGraph* graph = nullptr;
@@ -97,20 +95,23 @@ std::shared_ptr<FilterContext> create_filter(const AVCodecContext* ctx, const st
     }
     // clang-format on
 
-    filter_ctx->inputs = avfilter_inout_alloc();
-    filter_ctx->outputs = avfilter_inout_alloc();
+    auto* inputs = avfilter_inout_alloc();
+    auto* outputs = avfilter_inout_alloc();
 
-    filter_ctx->outputs->name = av_strdup("in");
-    filter_ctx->outputs->filter_ctx = filter_ctx->src_ctx;
-    filter_ctx->outputs->pad_idx = 0;
-    filter_ctx->outputs->next = nullptr;
+    DEFER(avfilter_inout_free(&inputs));
+    DEFER(avfilter_inout_free(&outputs));
 
-    filter_ctx->inputs->name = av_strdup("out");
-    filter_ctx->inputs->filter_ctx = filter_ctx->sink_ctx;
-    filter_ctx->inputs->pad_idx = 0;
-    filter_ctx->inputs->next = nullptr;
+    outputs->name = av_strdup("in");
+    outputs->filter_ctx = filter_ctx->src_ctx;
+    outputs->pad_idx = 0;
+    outputs->next = nullptr;
 
-    ret = avfilter_graph_parse(filter_ctx->graph, filter.data(), filter_ctx->inputs, filter_ctx->outputs, nullptr);
+    inputs->name = av_strdup("out");
+    inputs->filter_ctx = filter_ctx->sink_ctx;
+    inputs->pad_idx = 0;
+    inputs->next = nullptr;
+
+    ret = avfilter_graph_parse_ptr(filter_ctx->graph, filter.data(), &inputs, &outputs, nullptr);
     if (ret < 0)
     {
         return nullptr;
@@ -152,15 +153,27 @@ std::shared_ptr<H264Context> create_h264_context()
 {
     std::shared_ptr<H264Context> ctx(new H264Context, close_h264_context);
     const auto codec_id = AV_CODEC_ID_H264;
-    auto* codec = avcodec_find_decoder(codec_id);
+    const auto* codec = avcodec_find_decoder(codec_id);
+    if (codec == nullptr)
+    {
+        LOG_ERROR << "codec find failed";
+        return nullptr;
+    }
+
     ctx->codec_parse_ctx = av_parser_init(codec_id);
     ctx->codec_ctx = avcodec_alloc_context3(codec);
+    if (ctx->codec_ctx == nullptr)
+    {
+        LOG_ERROR << "codec context alloc failed";
+        return nullptr;
+    }
     ctx->pkg = av_packet_alloc();
     ctx->yuv_frame = av_frame_alloc();
 
     int ret = avcodec_open2(ctx->codec_ctx, codec, nullptr);
     if (ret != 0)
     {
+        LOG_ERROR << "open codec failed " << av_errno_to_string(ret);
         return nullptr;
     }
 
