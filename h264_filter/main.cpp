@@ -74,7 +74,7 @@ std::shared_ptr<FilterContext> create_filter(const AVCodecContext* ctx, const st
              ctx->sample_aspect_ratio.num,
              ctx->sample_aspect_ratio.den);
 
-    LOG_DEBUG << "config filter by " << args;
+    LOG_DEBUG << "filter args " << args;
 
     filter_ctx->graph = avfilter_graph_alloc();
 
@@ -116,6 +116,8 @@ std::shared_ptr<FilterContext> create_filter(const AVCodecContext* ctx, const st
     {
         return nullptr;
     }
+
+    LOG_DEBUG << "config filter " << filter;
 
     ret = avfilter_graph_config(filter_ctx->graph, nullptr);
     if (ret < 0)
@@ -304,7 +306,10 @@ int main(int argc, char** argv)
     uint8_t* data = file_bytes.data();
     size_t data_size = file_bytes.size();
     std::shared_ptr<FilterContext> filter_ctx = nullptr;
-    std::string filter_describe = " drawbox=100:200:200:60:red@0.5:t=2";
+    // std::string filter_describe = " drawbox=100:200:200:60:red@0.5:t=2";
+
+    //const char* filter_describe = "drawgrid=width=100:height=100:thickness=2:color=red@0.5";
+    const char* filter_describe = "split [main][tmp]; [tmp] crop=iw:ih/2:0:0, vflip [flip]; [main][flip] overlay=0:H/2";
 
     auto filter_cb = [&](AVFrame* frame) { write_frame_to_file(argv[2], frame); };
 
