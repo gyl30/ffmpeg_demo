@@ -30,3 +30,5 @@ add_subdirectory(h264_filter)
 add_subdirectory(aac_pcm)
 
 add_subdirectory(decode_video)
+
+add_subdirectory(rtp_ps_h264)
