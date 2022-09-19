@@ -147,7 +147,11 @@ void destroy_stream_context(StreamContext* ctx)
 void create_encode_codec_context(std::shared_ptr<StreamContext>& ctx)
 {
     const auto* codec = avcodec_find_encoder(ctx->codec_ctx->codec_id);
-
+    if (codec == nullptr)
+    {
+        LOG_ERROR << "not found codec " << avcodec_get_name(ctx->codec_ctx->codec_id);
+        return;
+    }
     ctx->encode_codec_ctx = avcodec_alloc_context3(codec);
     if (ctx->encode_codec_ctx == nullptr)
     {
@@ -160,14 +164,13 @@ void create_encode_codec_context(std::shared_ptr<StreamContext>& ctx)
     ctx->encode_codec_ctx->framerate = ctx->codec_ctx->framerate;
     ctx->encode_codec_ctx->sample_aspect_ratio = ctx->codec_ctx->sample_aspect_ratio;
 
+    ctx->encode_codec_ctx->pix_fmt = ctx->codec_ctx->pix_fmt;
+
     if (codec->pix_fmts != nullptr)
     {
         ctx->encode_codec_ctx->pix_fmt = codec->pix_fmts[0];
     }
-    else
-    {
-        ctx->encode_codec_ctx->pix_fmt = ctx->codec_ctx->pix_fmt;
-    }
+
     auto ex = ScopedExit::make_scoped_exit([&]() { destroy_steam_encode_codec(ctx.get()); });
     int ret = avcodec_open2(ctx->encode_codec_ctx, codec, nullptr);
     if (ret != 0)
@@ -185,7 +188,7 @@ std::shared_ptr<StreamContext> create_stream_context(AVCodecID codec_id)
     const auto* codec = avcodec_find_decoder(codec_id);
     if (codec == nullptr)
     {
-        LOG_ERROR << "codec find failed";
+        LOG_ERROR << "codec not find " << avcodec_get_name(codec_id);
         return nullptr;
     }
 
@@ -339,7 +342,7 @@ void encode_frame(std::shared_ptr<StreamContext>& stream_ctx, AVPacket* pkg, AVF
 
 void filter_frame(std::shared_ptr<StreamContext>& stream_ctx, AVFrame* frame1, const FilterCb& cb)
 {
-    int ret = av_buffersrc_add_frame_flags(stream_ctx->src_ctx, frame1, AV_BUFFERSRC_FLAG_KEEP_REF);
+    int ret = av_buffersrc_add_frame_flags(stream_ctx->src_ctx, frame1, 0);
     if (ret < 0)
     {
         LOG_ERROR << "av filter add frame failed " << av_errno_to_string(ret);
@@ -365,11 +368,13 @@ void filter_frame(std::shared_ptr<StreamContext>& stream_ctx, AVFrame* frame1, c
 
 AVCodecID get_codec_id_by_filename(const std::string& filename)
 {
-    if (std::string_view(filename).ends_with(".h264") || std::string_view(filename).ends_with(".264"))
+    std::string_view s(filename);
+
+    if (s.ends_with(".h264") || s.ends_with(".264"))
     {
         return AV_CODEC_ID_H264;
     }
-    if (std::string_view(filename).ends_with(".h265") || std::string_view(filename).ends_with(".265"))
+    if (s.ends_with(".h265") || s.ends_with(".265"))
     {
         return AV_CODEC_ID_H265;
     }
@@ -474,12 +479,12 @@ int main(int argc, char** argv)
     stream_ctx->filename = argv[2];
 
     // clang-format off
-    auto h264_cb = [&](int, int, int64_t, int64_t, const uint8_t* data, uint32_t len) { process_raw_bytes(stream_ctx, data, len); };
+    auto raw_cb = [&](int, int, int64_t, int64_t, const uint8_t* data, uint32_t len) { process_raw_bytes(stream_ctx, data, len); };
     // clang-format on
 
     auto file_bytes = read_file_to_buffer(argv[1]);
 
-    ps p(std::move(h264_cb));
+    ps p(std::move(raw_cb));
 
     auto ps_cb = [&p](const uint8_t* bytes, int len) { p.demuxer(bytes, len); };
 
