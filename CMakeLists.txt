@@ -36,3 +36,5 @@ add_subdirectory(rtp_ps_h264)
 add_subdirectory(encode_video)
 
 add_subdirectory(filter_video)
+
+add_subdirectory(rtp_filter)
