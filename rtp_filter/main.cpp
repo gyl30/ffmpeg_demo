@@ -102,6 +102,10 @@ void destroy_steam_encode_codec(StreamContext* ctx)
     {
         avcodec_free_context(&ctx->encode_codec_ctx);
     }
+    if (ctx->encode_pkg != nullptr)
+    {
+        av_packet_free(&ctx->encode_pkg);
+    }
 }
 void destroy_steam_decode_codec(StreamContext* ctx)
 {
