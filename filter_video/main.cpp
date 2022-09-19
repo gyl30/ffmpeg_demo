@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <functional>
+#include <cassert>
 #include "log.h"
 #include "scoped_exit.hpp"
 

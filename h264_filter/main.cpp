@@ -309,7 +309,7 @@ int main(int argc, char** argv)
     // std::string filter_describe = " drawbox=100:200:200:60:red@0.5:t=2";
 
     //const char* filter_describe = "drawgrid=width=100:height=100:thickness=2:color=red@0.5";
-    const char* filter_describe = "split [main][tmp]; [tmp] crop=iw:ih/2:0:0, vflip [flip]; [main][flip] overlay=0:H/2";
+    const char* filter_describe = "split [main][tmp]; [tmp] crop=iw/2:ih:0:0 [flip]; [main][flip] overlay=W/2:0";
 
     auto filter_cb = [&](AVFrame* frame) { write_frame_to_file(argv[2], frame); };
 
