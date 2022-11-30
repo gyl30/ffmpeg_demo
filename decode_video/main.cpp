@@ -142,6 +142,10 @@ class ff_decoder
             }
             av_packet_unref(pkg);
         }
+        // flush
+        pkg->data = nullptr;
+        pkg->size = 0;
+        decode_package(pkg);
         av_packet_free(&pkg);
     }
     void decode_package(AVPacket* pkg)
