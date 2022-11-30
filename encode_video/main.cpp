@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <utility>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -17,7 +18,7 @@ extern "C"
 #include <libavutil/pixdesc.h>
 }
 
-using DecodeCb = std::function<void(AVFrame*, AVPacket*)>;
+using DecodeCb = std::function<void(AVFrame*)>;
 using EncodeCb = std::function<void(AVPacket*)>;
 
 std::string av_errno_to_string(int err)
@@ -27,26 +28,6 @@ std::string av_errno_to_string(int err)
     return buff;
 }
 
-struct StreamContext
-{
-    int stream_index = -1;
-    AVStream* stream = nullptr;
-    AVCodecContext* codec_ctx = nullptr;
-};
-
-struct InputContext
-{
-    AVPacket* pkg = nullptr;
-    AVFrame* yuv_frame = nullptr;
-    AVFormatContext* fmt_ctx = nullptr;
-    std::vector<std::shared_ptr<StreamContext>> streams;
-};
-
-struct OutputContext
-{
-    AVPacket* pkg = nullptr;
-    std::vector<std::shared_ptr<StreamContext>> streams;
-};
 static void write_to_file(const std::string& filename, const uint8_t* data, int size)
 {
     FILE* fp = fopen(filename.data(), "ab+");
@@ -91,186 +72,228 @@ std::vector<uint8_t> read_file_to_buffer(const std::string& filename)
     return bytes;
 }
 
-std::shared_ptr<OutputContext> create_output_context(const std::shared_ptr<InputContext>& input)
+class ff_encode
 {
-    auto delete_fn = [](StreamContext* c)
+   public:
+    ff_encode(std::string codec_name, EncodeCb cb) : codec_name_(std::move(codec_name)), cb_(std::move(cb)) {}
+    ~ff_encode() = default;
+
+   public:
+    void encode(AVFrame* frame)
     {
-        if (c->codec_ctx != nullptr)
+        if (encoder_ctx == nullptr)
         {
-            avcodec_free_context(&c->codec_ctx);
+            open_encoder(frame);
         }
-    };
+        if (encoder_ctx != nullptr)
+        {
+            do_encode(frame);
+        }
+    }
+    void flush() { close_encoder(); }
 
-    auto out_ctx = std::make_shared<OutputContext>();
-    for (const auto& stream : input->streams)
+   private:
+    void do_encode(AVFrame* frame)
     {
-        if (stream->codec_ctx->codec_type != AVMEDIA_TYPE_VIDEO && stream->codec_ctx->codec_type != AVMEDIA_TYPE_AUDIO)
-        {
-            continue;
-        }
-
-        std::string codec_type = av_get_media_type_string(stream->codec_ctx->codec_type);
-
-        std::shared_ptr<StreamContext> stream_ctx(new StreamContext, delete_fn);
-
-        const auto* codec = avcodec_find_encoder(stream->codec_ctx->codec_id);
-        stream_ctx->codec_ctx = avcodec_alloc_context3(codec);
-        stream_ctx->stream_index = stream->stream_index;
-        if (stream->codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
-        {
-            stream_ctx->codec_ctx->height = stream->codec_ctx->height;
-            stream_ctx->codec_ctx->width = stream->codec_ctx->width;
-            stream_ctx->codec_ctx->sample_aspect_ratio = stream->codec_ctx->sample_aspect_ratio;
-
-            if (codec->pix_fmts != nullptr)
-            {
-                stream_ctx->codec_ctx->pix_fmt = codec->pix_fmts[0];
-            }
-            else
-            {
-                stream_ctx->codec_ctx->pix_fmt = stream->codec_ctx->pix_fmt;
-            }
-            stream_ctx->codec_ctx->time_base = (AVRational){1, 25};
-            stream_ctx->codec_ctx->framerate = (AVRational){25, 1};
-        }
-        else if (stream->codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
-        {
-            stream_ctx->codec_ctx->sample_rate = stream->codec_ctx->sample_rate;
-            stream_ctx->codec_ctx->ch_layout = stream->codec_ctx->ch_layout;
-            stream_ctx->codec_ctx->sample_fmt = codec->sample_fmts[0];
-            stream_ctx->codec_ctx->time_base = (AVRational){1, stream_ctx->codec_ctx->sample_rate};
-        }
-
-        int ret = avcodec_open2(stream_ctx->codec_ctx, codec, nullptr);
+        int ret = avcodec_send_frame(encoder_ctx, frame);
         if (ret < 0)
         {
-            LOG_ERROR << "codec open failed " << codec_type << " " << av_errno_to_string(ret);
-            assert(false);
-            continue;
+            LOG_ERROR << "encode frame failed " << av_errno_to_string(ret);
+            return;
         }
-        out_ctx->streams.push_back(stream_ctx);
-    }
-    out_ctx->pkg = av_packet_alloc();
-    return out_ctx;
-}
 
-std::shared_ptr<InputContext> create_input_context(const std::string& file)
-{
-    auto input_fn = [](InputContext* c)
-    {
-        avformat_free_context(c->fmt_ctx);
-        av_packet_free(&c->pkg);
-        av_frame_free(&c->yuv_frame);
-    };
-
-    std::shared_ptr<InputContext> input_ctx(new InputContext, input_fn);
-
-    input_ctx->fmt_ctx = avformat_alloc_context();
-
-    const AVInputFormat* iformat = nullptr;
-
-    int ret = avformat_open_input(&input_ctx->fmt_ctx, file.data(), iformat, nullptr);
-    if (ret != 0)
-    {
-        LOG_ERROR << "avformat open file " << file << " failed " << av_errno_to_string(ret);
-        return nullptr;
-    }
-    av_dump_format(input_ctx->fmt_ctx, 0, file.data(), 0);
-
-    auto delete_fn = [](StreamContext* c)
-    {
-        if (c->codec_ctx != nullptr)
+        while (ret >= 0)
         {
-            avcodec_free_context(&c->codec_ctx);
+            ret = avcodec_receive_packet(encoder_ctx, pkg_);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            {
+                break;
+            }
+            if (ret < 0)
+            {
+                break;
+            }
+            if (cb_)
+            {
+                cb_(pkg_);
+            }
         }
-    };
-
-    for (int i = 0; i < input_ctx->fmt_ctx->nb_streams; i++)
-    {
-        std::shared_ptr<StreamContext> stream_ctx(new StreamContext, delete_fn);
-        stream_ctx->stream_index = i;
-        stream_ctx->stream = input_ctx->fmt_ctx->streams[i];
-        const auto* codec = avcodec_find_decoder(stream_ctx->stream->codecpar->codec_id);
-        stream_ctx->codec_ctx = avcodec_alloc_context3(codec);
-        int err = avcodec_parameters_to_context(stream_ctx->codec_ctx, stream_ctx->stream->codecpar);
-        if (err < 0)
-        {
-            LOG_ERROR << "avcodec parameters to context failed " << av_errno_to_string(err);
-            continue;
-        }
-
-        stream_ctx->codec_ctx->pkt_timebase = stream_ctx->stream->time_base;
-        if (avcodec_open2(stream_ctx->codec_ctx, codec, nullptr) < 0)
-        {
-            LOG_ERROR << "open codec failed input stream index " << stream_ctx->stream_index;
-            continue;
-        }
-        input_ctx->streams.push_back(stream_ctx);
     }
-    input_ctx->pkg = av_packet_alloc();
-    input_ctx->yuv_frame = av_frame_alloc();
-    return input_ctx;
-}
-
-void encode_frame(AVCodecContext* codec_ctx, AVPacket* pkg, AVFrame* frame, const EncodeCb& cb)
-{
-    int ret = avcodec_send_frame(codec_ctx, frame);
-    if (ret < 0)
+    void open_encoder(AVFrame* frame)
     {
-        LOG_ERROR << "encode frame failed " << av_errno_to_string(ret);
-        return;
-    }
-
-    while (ret >= 0)
-    {
-        ret = avcodec_receive_packet(codec_ctx, pkg);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-        {
-            break;
-        }
-        if (ret < 0)
-        {
-            break;
-        }
-        if (cb)
-        {
-            cb(pkg);
-        }
-
-        // av_packet_unref(pkg);
-    }
-}
-
-void decode_package(AVCodecContext* codec_ctx, AVPacket* pkg, AVFrame* frame, const DecodeCb& cb)
-{
-    int ret = avcodec_send_packet(codec_ctx, pkg);
-    if (ret == AVERROR(EAGAIN))
-    {
-        LOG_ERROR << "Receive_frame and send_packet both returned EAGAIN, which is an API violation";
-    }
-    else if (ret < 0)
-    {
-        LOG_ERROR << "avcodec_send_packet failed " << av_errno_to_string(ret);
-        return;
-    }
-    while (ret >= 0)
-    {
-        ret = avcodec_receive_frame(codec_ctx, frame);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+        const auto* codec = avcodec_find_encoder_by_name(codec_name_.data());
+        auto* tmp_codec_ctx = avcodec_alloc_context3(codec);
+        if (tmp_codec_ctx == nullptr)
         {
             return;
         }
+        auto clean_up = ScopedExit::make_scoped_exit([&tmp_codec_ctx]() { avcodec_free_context(&tmp_codec_ctx); });
+        tmp_codec_ctx->height = frame->height;
+        tmp_codec_ctx->width = frame->width;
+        tmp_codec_ctx->sample_aspect_ratio = frame->sample_aspect_ratio;
+        if (codec->pix_fmts != nullptr)
+        {
+            tmp_codec_ctx->pix_fmt = codec->pix_fmts[0];
+        }
+        else
+        {
+            tmp_codec_ctx->pix_fmt = static_cast<AVPixelFormat>(frame->format);
+        }
+        // 25 fps
+        tmp_codec_ctx->time_base = (AVRational){25, 1};
+        tmp_codec_ctx->framerate = (AVRational){25, 1};
+
+        const int ret = avcodec_open2(tmp_codec_ctx, codec, nullptr);
         if (ret < 0)
         {
-            LOG_DEBUG << "avcodec_receive_frame failed " << av_errno_to_string(ret);
+            LOG_ERROR << "open " << codec_name_ << " codec failed " << av_errno_to_string(ret);
             return;
         }
-        if (cb)
+        clean_up.cancel();
+        encoder_ctx = tmp_codec_ctx;
+        pkg_ = av_packet_alloc();
+    }
+    void close_encoder()
+    {
+        avcodec_free_context(&encoder_ctx);
+        av_packet_free(&pkg_);
+    }
+
+   private:
+    std::string codec_name_;
+    EncodeCb cb_;
+    uint32_t packet_count = 0;
+    AVPacket* pkg_ = nullptr;
+    AVCodecContext* encoder_ctx = nullptr;
+};
+class ff_decoder
+{
+   public:
+    explicit ff_decoder(std::string filename, DecodeCb cb) : cb_(std::move(cb)), filename(std::move(filename)) {}
+    ~ff_decoder() = default;
+
+   public:
+    void run()
+    {
+        open();
+        decode();
+        close();
+    }
+
+   private:
+    void open()
+    {
+        AVInputFormat* iformat = nullptr;
+        int ret = avformat_open_input(&fmt_ctx, filename.data(), iformat, nullptr);
+        if (ret != 0)
         {
-            cb(frame, pkg);
+            LOG_ERROR << "avformat open file " << filename << " failed " << av_errno_to_string(ret);
+            return;
+        }
+        av_dump_format(fmt_ctx, 0, filename.data(), 0);
+        if (avformat_find_stream_info(fmt_ctx, nullptr) < 0)
+        {
+            LOG_ERROR << "cannot find input stream information";
+            return;
+        }
+        const AVCodec* dec;
+        // av_find_best_stream()
+        const int video_index = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &dec, 0);
+        if (video_index < 0)
+        {
+            LOG_ERROR << "file " << filename << " find video stream failed " << av_errno_to_string(ret);
+            return;
+        }
+        dec_ctx = avcodec_alloc_context3(dec);
+        avcodec_parameters_to_context(dec_ctx, fmt_ctx->streams[video_index]->codecpar);
+        ret = avcodec_open2(dec_ctx, dec, nullptr);
+        if (ret < 0)
+        {
+            LOG_ERROR << "file " << filename << " open codec failed " << av_errno_to_string(ret);
+            return;
+        }
+        video_stream_index = video_index;
+    }
+    void decode()
+    {
+        auto* pkg = av_packet_alloc();
+        while (av_read_frame(fmt_ctx, pkg) == 0)
+        {
+            if (pkg->stream_index == video_stream_index)
+            {
+                packet_count++;
+                // auto* stream = fmt_ctx->streams[pkg->stream_index];
+                // LOG_DEBUG << "1 packet index " << packet_count << " pkt ptos " << pkg->pos << " pkt size " <<
+                // pkg->size
+                //<< " pts " << pkg->pts << " dts " << pkg->dts << " pts "
+                //<< pkg->pts * av_q2d(stream->time_base);
+
+                // auto video_time_base = av_inv_q(dec_ctx->framerate);
+                // av_packet_rescale_ts(pkg, stream->time_base, video_time_base);
+                // LOG_DEBUG << "2 packet index " << packet_count << " pkt ptos " << pkg->pos << " pkt size " <<
+                // pkg->size
+                //<< " pts " << pkg->pts << " dts " << pkg->dts;
+
+                decode_package(pkg);
+            }
+            av_packet_unref(pkg);
+        }
+        pkg->data = nullptr;
+        pkg->size = 0;
+        av_packet_unref(pkg);
+        av_packet_free(&pkg);
+    }
+    void decode_package(AVPacket* pkg)
+    {
+        int ret = avcodec_send_packet(dec_ctx, pkg);
+        if (ret == AVERROR(EAGAIN))
+        {
+            LOG_ERROR << "Receive_frame and send_packet both returned EAGAIN, which is an API violation";
+        }
+        else if (ret < 0)
+        {
+            LOG_ERROR << "avcodec_send_packet failed " << av_errno_to_string(ret);
+            return;
+        }
+        while (ret >= 0)
+        {
+            auto* frame = av_frame_alloc();
+            DEFER(av_frame_free(&frame));
+            ret = avcodec_receive_frame(dec_ctx, frame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            {
+                return;
+            }
+            if (ret < 0)
+            {
+                LOG_DEBUG << "avcodec_receive_frame failed " << av_errno_to_string(ret);
+                return;
+            }
+
+            process_yuv_frame(frame);
         }
     }
-}
+    void process_yuv_frame(AVFrame* frame)
+    {
+        if (cb_)
+        {
+            cb_(frame);
+        }
+    }
+    void close()
+    {
+        avformat_free_context(fmt_ctx);
+        avcodec_free_context(&dec_ctx);
+    }
+
+   private:
+    DecodeCb cb_;
+    int video_stream_index = -1;
+    std::string filename;
+    uint32_t packet_count = 0;
+    AVFormatContext* fmt_ctx = nullptr;
+    AVCodecContext* dec_ctx = nullptr;
+};
 
 int main(int argc, char** argv)
 {
@@ -279,59 +302,26 @@ int main(int argc, char** argv)
         std::cerr << "Usage: " << argv[0] << " <in_file> <out_file>\n";
         return 1;
     }
-
-    auto input_ctx = create_input_context(argv[1]);
-    if (!input_ctx)
-    {
-        return -1;
-    }
-    std::shared_ptr<OutputContext> output_ctx = nullptr;
-    uint32_t frame_count = 0;
     uint32_t packet_count = 0;
     auto encode_cb = [&](AVPacket* pkg)
     {
-        printf("write packet %3" PRId64 " (size=%5d)\n", pkg->pts, pkg->size);
+        packet_count++;
+        LOG_DEBUG << "write " << packet_count << " packet size " << pkg->size;
+
         write_to_file(argv[2], pkg->data, pkg->size);
     };
 
-    auto decode_cb = [&](AVFrame* frame, AVPacket* pkg)
-    {
-        LOG_DEBUG << "frame index " << frame_count++ << " coded_picture_number " << frame->coded_picture_number
-                  << " pix_fmt " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " pkt pos "
-                  << frame->pkt_pos << " pkt size " << frame->pkt_size;
-        if (output_ctx == nullptr)
-        {
-            output_ctx = create_output_context(input_ctx);
-        }
-        if (!output_ctx)
-        {
-            return;
-        }
-        for (auto& stream : output_ctx->streams)
-        {
-            if (stream->stream_index != pkg->stream_index)
-            {
-                continue;
-            }
-            encode_frame(stream->codec_ctx, pkg, frame, encode_cb);
-        }
-        // write_frame_to_file(argv[2], frame);
-    };
-    while (av_read_frame(input_ctx->fmt_ctx, input_ctx->pkg) == 0)
-    {
-        LOG_DEBUG << "packet index " << packet_count++ << " pkt ptos " << input_ctx->pkg->pos << " pkt size "
-                  << input_ctx->pkg->size;
-        // clang-format off
-        decode_package(input_ctx->streams[input_ctx->pkg->stream_index]->codec_ctx, input_ctx->pkg, input_ctx->yuv_frame, decode_cb);
-        // clang-format on
-        av_packet_unref(input_ctx->pkg);
-    }
-    input_ctx->pkg->data = nullptr;
-    input_ctx->pkg->size = 0;
+    ff_encode encoder("libx264", encode_cb);
 
-    // clang-format off
-    decode_package( input_ctx->streams[input_ctx->pkg->stream_index]->codec_ctx, input_ctx->pkg, input_ctx->yuv_frame, decode_cb);
-    // clang-format on
+    auto decode_cb = [&](AVFrame* frame)
+    {
+        LOG_DEBUG << "1 coded_picture_number " << frame->coded_picture_number << " pix_fmt "
+                  << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " pkt pos " << frame->pkt_pos
+                  << " pkt size " << frame->pkt_size << " pts " << frame->pts;
+        encoder.encode(frame);
+    };
+    ff_decoder decoder(argv[1], decode_cb);
+    decoder.run();
 
     LOG_DEBUG << "Hello World";
 
